@@ -68,4 +68,17 @@ The new catalog alone misses older archetypes, so always merge into the current 
 
 ## Results so far
 
-Tested on a copy of the production index: 585 added, 0 deleted, 58 minutes. Central's 4.1.2 jar read the result in full (115,009,998 artifacts).
+Tested on a copy of the production index (115,697,725 artifacts), adding files published after the last full build. Three runs in a row, each on top of the one before:
+
+| Run | New files | Artifacts added | Deleted | Indexer time |
+|---|---|---|---|---|
+| 1 | 25,995 | 23,580 | 0 | 61 min |
+| 2 | 99,984 | 40,889 | 0 | 65 min |
+| 3 | 71,907 | 46,596 | 0 | 64 min |
+
+- The index ended at 115,808,790 artifacts: the starting count plus everything added.
+- The chain ID did not change, and the chunk number went up by one each run.
+- No artifact from the starting index was missing afterwards.
+- Running 2,000 of the same files again added nothing and deleted nothing.
+- The jar that Central runs today read the final published index in full: 115,808,790 artifacts, the same count.
+- A run takes about an hour whatever its size. Copying the index, loading it and writing it back is most of that, so fewer, larger runs are cheaper.
