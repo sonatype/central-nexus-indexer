@@ -1,0 +1,138 @@
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/DefaultNexusIndexer.java b/indexer-core/src/main/java/org/apache/maven/index/DefaultNexusIndexer.java
+index 8c9ba24..6fc9afe 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/DefaultNexusIndexer.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/DefaultNexusIndexer.java
+@@ -267,6 +267,13 @@ public class DefaultNexusIndexer
+     public void scan( final IndexingContext context, final String fromPath, final ArtifactScanningListener listener,
+                       final boolean update )
+         throws IOException
++    {
++        scan( context, fromPath, listener, update, true );
++    }
++
++    public void scan( final IndexingContext context, final String fromPath, final ArtifactScanningListener listener,
++                      final boolean update, final boolean deleteMissing )
++        throws IOException
+     {
+         File repositoryDirectory = context.getRepository();
+ 
+@@ -316,7 +323,7 @@ public class DefaultNexusIndexer
+                 true );
+ 
+             scanner.scan( new ScanningRequest( tmpContext, //
+-                new DefaultScannerListener( tmpContext, indexerEngine, update, listener ), fromPath ) );
++                new DefaultScannerListener( tmpContext, indexerEngine, update, deleteMissing, listener ), fromPath ) );
+ 
+             tmpContext.updateTimestamp( true );
+             context.replace( tmpContext.getIndexDirectory() );
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/DefaultScannerListener.java b/indexer-core/src/main/java/org/apache/maven/index/DefaultScannerListener.java
+index e57fdcc..c75ec64 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/DefaultScannerListener.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/DefaultScannerListener.java
+@@ -49,6 +49,8 @@ class DefaultScannerListener
+ 
+     private final boolean update;
+ 
++    private final boolean deleteMissing;
++
+     private final ArtifactScanningListener listener;
+ 
+     private final Set<String> uinfos = new HashSet<String>();
+@@ -66,10 +68,18 @@ class DefaultScannerListener
+     DefaultScannerListener( IndexingContext context, //
+                             IndexerEngine indexerEngine, boolean update, //
+                             ArtifactScanningListener listener )
++    {
++        this( context, indexerEngine, update, true, listener );
++    }
++
++    DefaultScannerListener( IndexingContext context, //
++                            IndexerEngine indexerEngine, boolean update, boolean deleteMissing, //
++                            ArtifactScanningListener listener )
+     {
+         this.context = context;
+         this.indexerEngine = indexerEngine;
+         this.update = update;
++        this.deleteMissing = deleteMissing;
+         this.listener = listener;
+     }
+ 
+@@ -164,7 +174,7 @@ class DefaultScannerListener
+ 
+             context.setAllGroups( allGroups );
+ 
+-            if ( update && !context.isReceivingUpdates() )
++            if ( update && deleteMissing && !context.isReceivingUpdates() )
+             {
+                 removeDeletedArtifacts( context, result );
+             }
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/NexusIndexer.java b/indexer-core/src/main/java/org/apache/maven/index/NexusIndexer.java
+index 2105003..df7b6df 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/NexusIndexer.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/NexusIndexer.java
+@@ -261,6 +261,14 @@ public interface NexusIndexer
+     void scan( IndexingContext context, String fromPath, ArtifactScanningListener listener, boolean update )
+         throws IOException;
+ 
++    /**
++     * Same as {@link #scan(IndexingContext, String, ArtifactScanningListener, boolean)}, but when
++     * <code>deleteMissing</code> is false, index entries for files not found in this scan are kept.
++     */
++    void scan( IndexingContext context, String fromPath, ArtifactScanningListener listener, boolean update,
++               boolean deleteMissing )
++        throws IOException;
++
+     void artifactDiscovered( ArtifactContext ac, IndexingContext context )
+         throws IOException;
+ 
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/cli/NexusIndexerCli.java b/indexer-core/src/main/java/org/apache/maven/index/cli/NexusIndexerCli.java
+index ec2484a..8ac2fb7 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/cli/NexusIndexerCli.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/cli/NexusIndexerCli.java
+@@ -99,6 +99,10 @@ public class NexusIndexerCli
+ 
+     public static final char UNPACK = 'u';
+ 
++    public static final char DELETE_MISSING = 'm';
++
++    public static final char FROM_PATH = 'p';
++
+     private static final long MB = 1024 * 1024;
+ 
+     private Options options;
+@@ -215,6 +219,15 @@ public class NexusIndexerCli
+         options.addOption( OptionBuilder.withLongOpt( "unpack" ) //
+                                .withDescription( "Unpack an index file" ).create( UNPACK ) );
+ 
++        options.addOption( OptionBuilder.withLongOpt( "delete-missing" ) //
++                               .withDescription( "Delete index entries for files no longer present in the repository. Default: false." ).create(
++                                   DELETE_MISSING ) );
++
++        options.addOption( OptionBuilder.withLongOpt( "from-path" ).hasArg() //
++                               .withDescription(
++                                   "Only scan this sub-path of the repository, relative to --repository." ).create(
++                                   FROM_PATH ) );
++
+         return options;
+     }
+ 
+@@ -302,6 +315,10 @@ public class NexusIndexerCli
+ 
+         boolean createLegacyIndex = cli.hasOption( LEGACY );
+ 
++        boolean deleteMissing = cli.hasOption( DELETE_MISSING );
++
++        String fromPath = cli.hasOption( FROM_PATH ) ? cli.getOptionValue( FROM_PATH ) : null;
++
+         boolean debug = cli.hasOption( DEBUG );
+ 
+         boolean quiet = cli.hasOption( QUIET );
+@@ -364,7 +381,7 @@ public class NexusIndexerCli
+ 
+             ArtifactScanningListener listener = new IndexerListener( context, debug, quiet );
+ 
+-            indexer.scan( context, listener, true );
++            indexer.scan( context, fromPath, listener, true, deleteMissing );
+ 
+             IndexPackingRequest request = new IndexPackingRequest( context, outputFolder );
+ 
