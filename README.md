@@ -26,11 +26,14 @@ The repo holds two patches, not a copy of the source.
 
 `patches/0002-plexus-utils-3.1.0.patch` adds a direct dependency on `plexus-utils` 3.1.0, the version in Central's jar. The 4.1.2 build otherwise bundles 2.0.5, whose XML parser throws `ArrayIndexOutOfBoundsException` on a processing instruction (such as `<?m2e ignore?>`) after character 8192 of a pom, and that stops the whole run.
 
+`patches/0003-skip-unreadable-pom.patch` handles a pom the XML parser throws an error on. The artifact is still indexed, without name and description (as for a pom with broken XML). It is logged as `[ERROR] Unreadable pom, indexed without pom data: <path>` and counted in `Scanning errors`. The run stops with `Too many unreadable poms` when more than 0.1% of the files are like that, after at least 1000 files.
+
 ## Build
 
 Needs `git` and `docker`.
 
     ./build.sh        # writes out/indexer-4.1.2-nodelete-cli.jar
+    EXCLUDE="0002" ./build.sh   # leaves a patch out, only for the skip test below
 
 ## Run
 
@@ -57,6 +60,10 @@ The indexer loads all existing entries (about 115 million) before it scans, and 
     tests/verify-incremental.sh JAR BEFORE_INDEX AFTER_INDEX BEFORE_PUBLISH AFTER_PUBLISH [EXPECTED_ADDED]
 
 Checks that artifacts were added, none deleted, the chain ID is unchanged and a new incremental chunk was written. Needs a JDK (`javac`).
+
+    tests/verify-skip-unreadable-pom.sh SKIP_JAR [CONTROL_JAR [FINAL_JAR]]
+
+The second test runs the real pom that crashed the first sizing run (`tests/fixtures/verbatime-0.8.2.pom`, a `<?m2e ignore?>` after character 8192). SKIP_JAR is built with `EXCLUDE="0002"`: it must index the pom without pom data, log and count it, stop at 3 bad poms in 1100 files and go on at 1 in 1100. CONTROL_JAR is built with `EXCLUDE="0002 0003"` and must crash. FINAL_JAR is the normal build and must read the pom with no error.
 
 ## Archetype catalog
 

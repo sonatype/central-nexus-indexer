@@ -11,7 +11,10 @@ trap 'rm -rf "$work"' EXIT
 
 mkdir -p "$out" "$m2"
 git clone -q --depth 1 --branch "$TAG" https://github.com/sonatype/maven-indexer.git "$work/src"
-git -C "$work/src" apply "$here"/patches/*.patch
+for patch in "$here"/patches/*.patch; do
+  case " ${EXCLUDE:-} " in *" $(basename "$patch" | cut -c1-4) "*) continue ;; esac  # EXCLUDE="0002" skips a patch, for tests
+  git -C "$work/src" apply "$patch"
+done
 
 docker run --rm -v "$work/src":/work -v "$m2":/root/.m2 -w /work \
   maven:3.8.8-eclipse-temurin-8 mvn -B -q -DskipTests package
