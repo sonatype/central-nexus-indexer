@@ -1,0 +1,166 @@
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/ArtifactContext.java b/indexer-core/src/main/java/org/apache/maven/index/ArtifactContext.java
+index 1b312dd..d6809cd 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/ArtifactContext.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/ArtifactContext.java
+@@ -28,6 +28,8 @@ import java.io.InputStreamReader;
+ import java.io.Reader;
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentMap;
+ 
+ import org.apache.lucene.document.Document;
+ import org.apache.lucene.document.Field;
+@@ -93,7 +95,7 @@ public class ArtifactContext
+         {
+             try
+             {
+-                return new ModelReader().readModel( new FileInputStream( getPom() ) );
++                return new ModelReader().readModel( new FileInputStream( getPom() ), getPom().getAbsolutePath() );
+             }
+             catch ( FileNotFoundException e )
+             {
+@@ -113,7 +115,8 @@ public class ArtifactContext
+ 
+                 if ( handle.hasEntry( embeddedPomPath ) )
+                 {
+-                    return new ModelReader().readModel( handle.getEntryContent( embeddedPomPath ) );
++                    return new ModelReader().readModel( handle.getEntryContent( embeddedPomPath ),
++                                                        getArtifact().getAbsolutePath() );
+                 }
+             }
+             catch ( IOException e )
+@@ -200,7 +203,15 @@ public class ArtifactContext
+ 
+     public static class ModelReader
+     {
++        // poms whose parser threw an unexpected error: path -> message. Read and reset by DefaultScanner.
++        public static final ConcurrentMap<String, String> UNREADABLE = new ConcurrentHashMap<String, String>();
++
+         public Model readModel( InputStream pom )
++        {
++            return readModel( pom, null );
++        }
++
++        public Model readModel( InputStream pom, String name )
+         {
+             if ( pom == null )
+             {
+@@ -209,7 +220,7 @@ public class ArtifactContext
+ 
+             Model model = new Model();
+ 
+-            Xpp3Dom dom = readPomInputStream( pom );
++            Xpp3Dom dom = readPomInputStream( pom, name );
+ 
+             if ( dom == null )
+             {
+@@ -239,7 +250,7 @@ public class ArtifactContext
+             return model;
+         }
+ 
+-        private Xpp3Dom readPomInputStream( InputStream is )
++        private Xpp3Dom readPomInputStream( InputStream is, String name )
+         {
+             Reader r = new InputStreamReader( is );
+             try
+@@ -252,6 +263,11 @@ public class ArtifactContext
+             catch ( IOException e )
+             {
+             }
++            catch ( RuntimeException e )
++            {
++                // a pom the parser cannot read is indexed without pom data, like one with broken XML
++                UNREADABLE.putIfAbsent( name == null ? "(embedded pom)" : name, String.valueOf( e ) );
++            }
+             finally
+             {
+                 try
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/DefaultScanner.java b/indexer-core/src/main/java/org/apache/maven/index/DefaultScanner.java
+index d796234..1107255 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/DefaultScanner.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/DefaultScanner.java
+@@ -20,10 +20,13 @@ package org.apache.maven.index;
+  */
+ 
+ import java.io.File;
++import java.io.IOException;
+ import java.util.Arrays;
+ import java.util.Comparator;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.TreeSet;
++import java.util.concurrent.atomic.AtomicLong;
+ 
+ import org.apache.maven.index.context.IndexingContext;
+ import org.codehaus.plexus.component.annotations.Component;
+@@ -41,6 +44,13 @@ public class DefaultScanner
+     extends AbstractLogEnabled
+     implements Scanner
+ {
++    // stop the run when more than 0.1% of the files have a pom the parser cannot read (after 1000 files)
++    private static final long GUARD_MIN_FILES = 1000;
++
++    private static final long GUARD_MAX_PERMILLE = 1;
++
++    private final AtomicLong filesSeen = new AtomicLong();
++
+     @Requirement
+     private ArtifactContextProducer artifactContextProducer;
+ 
+@@ -50,7 +60,25 @@ public class DefaultScanner
+ 
+         ScanningResult result = new ScanningResult();
+ 
+-        scanDirectory( request.getStartingDirectory(), request );
++        ArtifactContext.ModelReader.UNREADABLE.clear();
++
++        filesSeen.set( 0 );
++
++        try
++        {
++            scanDirectory( request.getStartingDirectory(), request );
++        }
++        finally
++        {
++            for ( Map.Entry<String, String> e : ArtifactContext.ModelReader.UNREADABLE.entrySet() )
++            {
++                String msg = "Unreadable pom, indexed without pom data: " + e.getKey() + ": " + e.getValue();
++
++                getLogger().error( msg );
++
++                result.addException( new IOException( msg ) );
++            }
++        }
+ 
+         request.getArtifactScanningListener().scanningFinished( request.getIndexingContext(), result );
+ 
+@@ -105,6 +133,15 @@ public class DefaultScanner
+         {
+             request.getArtifactScanningListener().artifactDiscovered( ac );
+         }
++
++        long seen = filesSeen.incrementAndGet();
++
++        long bad = ArtifactContext.ModelReader.UNREADABLE.size();
++
++        if ( seen >= GUARD_MIN_FILES && bad * 1000 > seen * GUARD_MAX_PERMILLE )
++        {
++            throw new IllegalStateException( "Too many unreadable poms: " + bad + " in " + seen + " files" );
++        }
+     }
+ 
+     // ==
+diff --git a/indexer-core/src/main/java/org/apache/maven/index/locator/ArtifactLocator.java b/indexer-core/src/main/java/org/apache/maven/index/locator/ArtifactLocator.java
+index b0f6cef..664f592 100644
+--- a/indexer-core/src/main/java/org/apache/maven/index/locator/ArtifactLocator.java
++++ b/indexer-core/src/main/java/org/apache/maven/index/locator/ArtifactLocator.java
+@@ -56,7 +56,7 @@ public class ArtifactLocator
+         try
+         {
+             // need to read the pom model to get packaging
+-            Model model = new ModelReader().readModel( new FileInputStream( source ) );
++            Model model = new ModelReader().readModel( new FileInputStream( source ), source.getAbsolutePath() );
+ 
+             if ( model == null )
+             {
